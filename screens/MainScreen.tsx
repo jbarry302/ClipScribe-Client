@@ -1,10 +1,28 @@
 import { useState } from "react";
-import { View, Text, TouchableOpacity, ActivityIndicator, TextInput, ScrollView, Image, Platform } from "react-native";
+import {
+    View,
+    Text,
+    TouchableOpacity,
+    ActivityIndicator,
+    TextInput,
+    ScrollView,
+    Image,
+    Platform,
+} from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import * as Clipboard from "expo-clipboard";
 import * as VideoThumbnails from "expo-video-thumbnails";
+import * as FileSystem from "expo-file-system"; // For mobile file saving
 import { Feather } from "@expo/vector-icons";
-import { generateWebThumbnail } from "@/utils/mediaUtils"; // Import the utility
+import { generateWebThumbnail } from "@/utils/mediaUtils";
+import axios from "axios";
+
+
+type TranscriptionResponse = {
+    status: 'success' | 'error';
+    transcription?: string;
+    error?: string;
+}
 
 export default function MainScreen() {
     const [video, setVideo] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
@@ -12,6 +30,10 @@ export default function MainScreen() {
     const [loading, setLoading] = useState(false);
     const [transcribedText, setTranscribedText] = useState<string | null>(null);
     const [isCopied, setIsCopied] = useState(false);
+    const [isSaved, setIsSaved] = useState(false); // New state for save confirmation
+    const [error, setError] = useState<string | null>(null);
+
+    const API_URL = "http://127.0.0.1:8000/api/v1/transcribe/";
 
     const pickVideo = async () => {
         let result = await DocumentPicker.getDocumentAsync({ type: "video/*" });
@@ -19,6 +41,7 @@ export default function MainScreen() {
             const selectedVideo = result.assets[0];
             setVideo(selectedVideo);
             setTranscribedText(null);
+            setError(null);
 
             if (Platform.OS === "web") {
                 try {
@@ -45,20 +68,87 @@ export default function MainScreen() {
 
     const transcribeVideo = async () => {
         if (!video) return;
+
         setLoading(true);
-        setTimeout(() => {
+        setError(null);
+
+        try {
+            const formData = new FormData();
+            if (Platform.OS === "web") {
+                const blob = await fetch(video.uri).then((res) => res.blob());
+                formData.append("file", blob, video.name || "video.mp4");
+            } else {
+                const fileData = {
+                    uri: video.uri,
+                    name: video.name || "video.mp4",
+                    type: video.mimeType || "video/mp4",
+                };
+                formData.append("file", fileData as any);
+            }
+
+            const response = await axios.post<TranscriptionResponse>(API_URL, formData, {
+                headers: {
+                    "Content-Type": "multipart/form-data",
+                },
+            });
+
+            if (response.data.status === "success") {
+                if (!response.data.transcription) {
+                    setError("Cannot find any meaningful transcription");
+                    return;
+                }
+                setTranscribedText(response.data.transcription.trim());
+            } else {
+                setError(response.data.error || "Transcription failed");
+            }
+        } catch (err) {
+            console.error("Transcription error:", err);
+            setError("Failed to connect to server or process video");
+        } finally {
             setLoading(false);
-            setTranscribedText("This is a sample transcribed text from the uploaded video.".repeat(100));
-        }, 3000);
+        }
     };
 
     const copyToClipboard = async () => {
         if (transcribedText) {
             await Clipboard.setStringAsync(transcribedText);
             setIsCopied(true);
-            setTimeout(() => {
-                setIsCopied(false);
-            }, 2000);
+            setTimeout(() => setIsCopied(false), 2000);
+        }
+    };
+
+    const saveTranscription = async () => {
+        if (!transcribedText || !video) return;
+
+        try {
+            const timestamp = new Date()
+                .toISOString()
+                .replace(/[-:T]/g, "")
+                .slice(0, 14);
+            const baseName = video.name ? video.name.replace(/\.[^/.]+$/, "") : "video";
+            const fileName = `${baseName}_${timestamp}.txt`;
+
+            if (Platform.OS === "web") {
+                const blob = new Blob([transcribedText], { type: "text/plain" });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement("a");
+                link.href = url;
+                link.download = fileName;
+                link.click();
+                URL.revokeObjectURL(url);
+            } else {
+                const fileUri = `${FileSystem.cacheDirectory}${fileName}`;
+                await FileSystem.writeAsStringAsync(fileUri, transcribedText, {
+                    encoding: FileSystem.EncodingType.UTF8,
+                });
+                console.log(`File saved to: ${fileUri}`);
+            }
+
+            setIsSaved(true);
+            setTimeout(() => setIsSaved(false), 2000);
+        } catch (err) {
+            console.error("Save error:", err);
+            setError("Failed to save transcription");
         }
     };
 
@@ -103,10 +193,14 @@ export default function MainScreen() {
                         <TouchableOpacity
                             onPress={transcribeVideo}
                             disabled={!video || loading}
-                            className={`w-full py-3 rounded-xl flex items-center justify-center transition ${video ? "bg-gradient-to-r from-blue-600 to-indigo-600 shadow-md" : "bg-gray-300"
+                            className={`w-full py-3 rounded-xl flex items-center justify-center transition ${video && !loading ? "bg-gradient-to-r from-blue-600 to-indigo-600 shadow-md" : "bg-gray-300"
                                 }`}
                         >
-                            {loading ? <ActivityIndicator color="white" /> : <Text className="text-white font-semibold text-lg">Transcribe</Text>}
+                            {loading ? (
+                                <ActivityIndicator color="white" />
+                            ) : (
+                                <Text className="text-white font-semibold text-lg">Transcribe</Text>
+                            )}
                         </TouchableOpacity>
                     </View>
                 </View>
@@ -124,8 +218,12 @@ export default function MainScreen() {
                                 <TextInput
                                     multiline
                                     editable={false}
-                                    value={transcribedText || "No transcription yet. Upload a video to begin."}
-                                    className="text-gray-800 p-3 flex-1"
+                                    value={
+                                        error
+                                            ? `Error: ${error}`
+                                            : transcribedText || "No transcription yet. Upload a video to begin."
+                                    }
+                                    className={`text-gray-800 p-3 flex-1 ${error ? "text-red-600" : ""}`}
                                     style={{ minHeight: 200 }}
                                 />
                             </ScrollView>
@@ -147,9 +245,19 @@ export default function MainScreen() {
                                 </Text>
                             </TouchableOpacity>
 
-                            <TouchableOpacity className="h-10 flex flex-row items-center">
-                                <Feather name="download" size={20} color="#4F46E5" />
-                                <Text className="ml-2 text-blue-600 font-medium">Save</Text>
+                            <TouchableOpacity
+                                onPress={saveTranscription}
+                                disabled={!transcribedText || isSaved}
+                                className={`h-10 w-24 flex flex-row items-center justify-center rounded-md transition-colors ${isSaved ? "bg-green-100 border border-green-300" : "bg-blue-50 hover:bg-blue-100"
+                                    }`}
+                            >
+                                <Feather name={isSaved ? "check" : "download"} size={20} color={isSaved ? "#15803d" : "#4F46E5"} />
+                                <Text
+                                    className={`ml-1 text-sm font-medium truncate ${isSaved ? "text-green-700" : "text-blue-600"}`}
+                                    numberOfLines={1}
+                                >
+                                    {isSaved ? "Saved!" : "Save"}
+                                </Text>
                             </TouchableOpacity>
                         </View>
                     </View>

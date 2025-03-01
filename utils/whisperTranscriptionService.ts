@@ -1,4 +1,4 @@
-// utils/whisperTranscriptionService.ts
+// TODO: https://platform.openai.com/docs/api-reference/audio/createTranscription
 
 // Base JSON response (default or "json")
 export type JsonTranscription = {
